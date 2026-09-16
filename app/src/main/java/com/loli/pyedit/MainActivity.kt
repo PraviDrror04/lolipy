@@ -2,6 +2,7 @@ package com.loli.pyedit
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -9,12 +10,14 @@ import android.provider.OpenableColumns
 import android.view.View
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.JsPromptResult
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.EditText
 import android.widget.Toast
 import org.json.JSONObject
 
@@ -95,6 +98,40 @@ class MainActivity : Activity() {
                         "LoliPy",
                         "console[${msg.messageLevel()}]: ${msg.message()} (${msg.sourceId()}:${msg.lineNumber()})"
                     )
+                    return true
+                }
+
+                /**
+                 * 让 Python 的 input() 能通过 window.prompt() 弹出原生输入框。
+                 * Pyodide 同步执行时，JS 线程会阻塞在 prompt 上，这里在 UI 线程
+                 * 弹出对话框，用户确认后 result.confirm(value) 解除阻塞。
+                 */
+                override fun onJsPrompt(
+                    view: WebView?,
+                    url: String?,
+                    message: String?,
+                    defaultValue: String?,
+                    result: JsPromptResult
+                ): Boolean {
+                    try {
+                        val input = EditText(this@MainActivity)
+                        input.setText(defaultValue ?: "")
+                        input.setSingleLine(true)
+                        input.hint = "在这里输入…"
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle(message ?: "请输入")
+                            .setView(input)
+                            .setPositiveButton("确定") { _, _ ->
+                                result.confirm(input.text.toString())
+                            }
+                            .setNegativeButton("取消") { _, _ ->
+                                result.cancel()
+                            }
+                            .setOnCancelListener { result.cancel() }
+                            .show()
+                    } catch (e: Exception) {
+                        result.cancel()
+                    }
                     return true
                 }
             }

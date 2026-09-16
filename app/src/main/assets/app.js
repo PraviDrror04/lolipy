@@ -87,6 +87,30 @@
     pre.scrollTop = pre.scrollHeight;
   }
 
+  // ---------- input() 支持 ----------
+  // Pyodide 同步执行不支持交互式 stdin，这里用 window.prompt()（原生层
+  // onJsPrompt 已接入 AlertDialog）替换内置 input()，让 input() 能弹框等待输入。
+  function installInputShim(py) {
+    try {
+      py.runPython(
+        'import builtins\n' +
+        'import sys\n' +
+        'from js import prompt as _js_prompt\n' +
+        'def _loli_input(p=""):\n' +
+        '    try:\n' +
+        '        sys.stdout.write(str(p))\n' +
+        '        sys.stdout.flush()\n' +
+        '    except Exception:\n' +
+        '        pass\n' +
+        '    s = _js_prompt(str(p))\n' +
+        '    return "" if s is None else str(s)\n' +
+        'builtins.input = _loli_input\n'
+      );
+    } catch (e) {
+      console.log('installInputShim failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
   // ---------- 运行 Python ----------
   function runCode() {
     var code = editor.getValue();
@@ -99,6 +123,7 @@
         try {
           py.setStdout({ batched: function (s) { appendOut(s); } });
           py.setStderr({ batched: function (s) { appendOut(s); } });
+          installInputShim(py);
           var r = py.runPython(code);
           if (r !== undefined && r !== null) appendOut(String(r) + '\n');
           appendOut('\n>>> 运行结束\n');
