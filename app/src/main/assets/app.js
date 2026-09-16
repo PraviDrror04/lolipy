@@ -1,7 +1,7 @@
 /* =========================================================
  * 萝莉Python · 主逻辑
- *  - CodeMirror 6 编辑器（ESM 动态加载）
- *  - Pyodide 运行 Python
+ *  - CodeMirror 5.65.16（本地 vendor/，离线秒开，不白屏）
+ *  - Pyodide 运行 Python（多 CDN 源自动降级）
  *  - DeepSeek API 助手（小码）
  * ========================================================= */
 
@@ -35,6 +35,8 @@ squares = [x * x for x in range(6)]
 print("平方数:", squares)
 `;
 
+const STORAGE_KEY_CODE = "lolipy_code";
+
 /* ---------- 控制台输出 ---------- */
 function log(text, cls = "") {
   const out = $("output");
@@ -48,103 +50,132 @@ function logSys(t) { log("· " + t, "sys"); }
 function logOk(t)  { log("✔ " + t, "ok"); }
 function logErr(t) { log("✘ " + t, "err"); }
 
-/* ---------- CodeMirror 初始化 ---------- */
-async function initEditor() {
-  const [{ EditorState, Compartment }, { EditorView, keymap, lineNumbers,
-           highlightActiveLine, highlightActiveLineGutter, drawSelection,
-           dropCursor, rectangularSelection, crosshairCursor, highlightSpecialChars },
-         { defaultKeymap, history, historyKeymap, indentWithTab },
-         { python },
-         { syntaxHighlighting, defaultHighlightStyle, bracketMatching, indentOnInput, foldGutter, foldKeymap },
-         { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap }] =
-    await Promise.all([
-      import("https://esm.sh/@codemirror/state@6"),
-      import("https://esm.sh/@codemirror/view@6"),
-      import("https://esm.sh/@codemirror/commands@6"),
-      import("https://esm.sh/@codemirror/lang-python@6"),
-      import("https://esm.sh/@codemirror/language@6"),
-      import("https://esm.sh/@codemirror/autocomplete@6"),
-    ]);
-
-  const theme = EditorView.theme({
-    "&": { backgroundColor: "transparent", color: "var(--ink)" },
-    ".cm-content": { caretColor: "var(--pink-3)", padding: "8px 0" },
-    ".cm-gutters": { backgroundColor: "transparent", color: "var(--ink-soft)", border: "none" },
-    ".cm-activeLine": { backgroundColor: "rgba(255,154,197,.10)" },
-    ".cm-activeLineGutter": { backgroundColor: "rgba(255,154,197,.14)" },
-    "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
-      backgroundColor: "rgba(183,156,255,.28) !important"
-    },
-    ".cm-cursor": { borderLeftColor: "var(--pink-3)", borderLeftWidth: "2px" },
-  }, { dark: false });
-
-  const startState = EditorState.create({
-    doc: DEFAULT_CODE,
-    extensions: [
-      lineNumbers(), highlightActiveLineGutter(), highlightSpecialChars(),
-      history(), foldGutter(), drawSelection(), dropCursor(),
-      EditorState.allowMultipleSelections.of(true),
-      indentOnInput(), syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-      bracketMatching(), closeBrackets(), autocompletion(), rectangularSelection(),
-      crosshairCursor(), highlightActiveLine(),
-      keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap,
-                 ...foldKeymap, ...completionKeymap, indentWithTab]),
-      python(), theme,
-    ],
-  });
-
-  state.cm = new EditorView({ state: startState, parent: $("editor") });
-  updateStatus();
-  state.cm.dom.addEventListener("keyup", updateStatus);
-  state.cm.dom.addEventListener("click", updateStatus);
-}
-
-function getCode() { return state.cm.state.doc.toString(); }
-function setCode(text) {
-  state.cm.dispatch({
-    changes: { from: 0, to: state.cm.state.doc.length, insert: text }
-  });
-}
-function updateStatus() {
-  const doc = state.cm.state.doc;
-  const sel = state.cm.state.selection.main;
-  const line = doc.lineAt(sel.head).number;
-  $("editor-status").textContent = `Python 3 · 第 ${line} 行 · ${doc.length} 字符 ⭐`;
-}
-
-/* ---------- Pyodide 加载与运行 ---------- */
-async function initPyodide() {
-  $("loading").classList.remove("hidden");
-  logSys("正在加载 Pyodide (Python 3 WASM)…");
-  try {
-    const script = document.createElement("script");
-    script.src = "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js";
-    document.head.appendChild(script);
-    await new Promise((res, rej) => { script.onload = res; script.onerror = rej; });
-
-    state.pyodide = await window.loadPyodide({
-      indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/"
-    });
-    // 把 print/错误 输出接到控制台
-    state.pyodide.setStdout({ batched: (s) => log(s) });
-    state.pyodide.setStderr({ batched: (s) => log(s, "err") });
-    $("runtime-status").textContent = "Pyodide 就绪 · Python 3.12 ⭐";
-    logOk("Python 环境已就绪！");
-  } catch (e) {
-    $("runtime-status").textContent = "Pyodide 加载失败";
-    logErr("Python 环境加载失败：" + e.message);
-    logSys("（首次运行需要联网下载运行时，请确认网络可用）");
-  } finally {
-    $("loading").classList.add("hidden");
+/* ---------- CodeMirror 5 初始化（纯本地，同步可用） ---------- */
+function initEditor() {
+  if (typeof CodeMirror === "undefined") {
+    logErr("编辑器内核未加载（vendor/codemirror.js 缺失）");
+    return false;
   }
+
+  const savedCode = localStorage.getItem(STORAGE_KEY_CODE);
+
+  state.cm = CodeMirror($("editor"), {
+    value: savedCode || DEFAULT_CODE,
+    mode: { name: "python", version: 3, singleLineStringErrors: false },
+    lineNumbers: true,
+    indentUnit: 4,
+    tabSize: 4,
+    indentWithTabs: false,
+    smartIndent: true,
+    lineWrapping: false,
+    styleActiveLine: true,
+    matchBrackets: true,
+    autoCloseBrackets: true,
+    theme: "lolipy",           // 自定义粉紫主题（见 style.css）
+    extraKeys: {
+      "Tab": (cm) => {
+        if (cm.somethingSelected()) cm.indentSelection("add");
+        else cm.replaceSelection("    ", "end");
+      },
+      "Shift-Tab": (cm) => cm.indentSelection("subtract"),
+      "Ctrl-/": (cm) => cm.toggleComment(),
+      "Cmd-/": (cm) => cm.toggleComment(),
+    },
+    placeholder: "# 在这里写 Python 吧～",
+  });
+
+  updateStatus();
+  state.cm.on("cursorActivity", updateStatus);
+  state.cm.on("change", () => {
+    updateStatus();
+    // 防抖保存草稿
+    clearTimeout(state._saveTimer);
+    state._saveTimer = setTimeout(() => {
+      try { localStorage.setItem(STORAGE_KEY_CODE, state.cm.getValue()); } catch (_) {}
+    }, 500);
+  });
+
+  // 首次聚焦
+  setTimeout(() => state.cm && state.cm.refresh(), 60);
+  return true;
+}
+
+function getCode() { return state.cm ? state.cm.getValue() : ""; }
+function setCode(text) { if (state.cm) state.cm.setValue(text); }
+function updateStatus() {
+  if (!state.cm) return;
+  const cur = state.cm.getCursor();
+  const len = state.cm.getValue().length;
+  $("editor-status").textContent = `Python 3 · 第 ${cur.line + 1} 行 · ${len} 字符 ⭐`;
+}
+
+/* ---------- Pyodide 加载（多源降级） ---------- */
+const PYODIDE_SOURCES = [
+  "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/",
+  "https://fastly.jsdelivr.net/pyodide/v0.26.2/full/",
+  "https://unpkg.com/pyodide@0.26.2/",
+  "https://cdnjs.cloudflare.com/ajax/libs/pyodide/0.26.2/",
+];
+
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = res;
+    s.onerror = () => rej(new Error("加载失败: " + src));
+    document.head.appendChild(s);
+  });
+}
+
+async function initPyodide() {
+  const mask = $("py-loading");
+  const maskText = $("py-loading-text");
+  // 只在「运行」时打扰用户，且给出可跳过提示
+  logSys("正在准备 Python 环境（首次需联网下载，请稍候）…");
+  $("runtime-status").textContent = "Python 环境加载中…";
+  if (mask) mask.classList.remove("hidden");
+
+  let lastErr = null;
+  for (const base of PYODIDE_SOURCES) {
+    try {
+      if (maskText) maskText.textContent = "小码正在准备 Python 环境…\n(" + new URL(base).host + ")";
+      logSys("尝试源: " + new URL(base).host);
+      await loadScript(base + "pyodide.js");
+      state.pyodide = await window.loadPyodide({ indexURL: base });
+      state.pyodide.setStdout({ batched: (s) => log(s) });
+      state.pyodide.setStderr({ batched: (s) => log(s, "err") });
+      $("runtime-status").textContent = "Python 3.12 就绪 ⭐";
+      logOk("Python 环境已就绪！");
+      if (mask) mask.classList.add("hidden");
+      return true;
+    } catch (e) {
+      lastErr = e;
+      logErr("该源不可用：" + e.message);
+    }
+  }
+
+  $("runtime-status").textContent = "Python 环境加载失败";
+  logErr("Python 环境加载失败：" + (lastErr ? lastErr.message : "未知错误"));
+  logSys("（首次运行需要联网下载约 30MB 运行时，请确认网络可用后重试）");
+  if (mask) mask.classList.add("hidden");
+  return false;
+}
+
+/* 运行时未就绪时，按需加载后执行 */
+async function ensurePyodide() {
+  if (state.pyodide) return true;
+  return await initPyodide();
 }
 
 async function runCode() {
   if (state.running) return;
-  if (!state.pyodide) { logErr("Python 环境尚未就绪，请稍候…"); return; }
+  $("btn-run").disabled = true;
+  const ok = await ensurePyodide();
+  if (!ok) { $("btn-run").disabled = false; return; }
+
   const code = getCode();
   state.running = true; state.stopRequested = false;
-  $("btn-run").disabled = true; $("btn-stop").disabled = false;
+  $("btn-stop").disabled = false;
   logSys("— 开始运行 —");
   const t0 = performance.now();
   try {
@@ -268,10 +299,10 @@ async function askAI(userText, systemExtra = "") {
   }
 }
 
-/* ---------- 工具按钮：把选中内容发给 AI ---------- */
+/* ---------- 工具按钮 ---------- */
 function getSelectionText() {
-  const sel = state.cm.state.selection.main;
-  return state.cm.state.sliceDoc(sel.from, sel.to);
+  if (!state.cm) return "";
+  return state.cm.getSelection();
 }
 
 const TOOL_PROMPTS = {
@@ -319,9 +350,12 @@ function bindUI() {
     };
   });
 
-  // 设置弹窗
   $("btn-cancel").onclick = () => $("settings-modal").classList.add("hidden");
   $("btn-save").onclick = saveSettings;
+
+  // 有屏幕变化时刷新编辑器尺寸
+  window.addEventListener("resize", () => state.cm && state.cm.refresh());
+  window.addEventListener("orientationchange", () => setTimeout(() => state.cm && state.cm.refresh(), 200));
 }
 
 function openSettings() {
@@ -347,20 +381,30 @@ window.__lolipyBack = function () {
   const modal = $("settings-modal");
   if (modal && !modal.classList.contains("hidden")) { modal.classList.add("hidden"); return; }
   if (drawer && !drawer.classList.contains("hidden")) { drawer.classList.add("hidden"); return; }
-  // 都不开着时，交给系统处理（原生侧可选择退出）
   if (window.AndroidBridge && AndroidBridge.toast) {
     AndroidBridge.toast("再按一次返回键退出哦～");
   }
 };
 
 /* ---------- 启动 ---------- */
-(async function boot() {
+(function boot() {
   if (localStorage.getItem("lolipy_dark") === "1") document.body.classList.add("dark");
+  document.body.classList.remove("loading-mode");
   bindUI();
-  try {
-    await initEditor();
-  } catch (e) {
-    logErr("编辑器初始化失败（需联网加载 CodeMirror）：" + e.message);
+
+  const ok = initEditor();
+  if (ok) {
+    logOk("编辑器已就绪（离线内核）");
+  } else {
+    // 极端兜底：即便 CodeMirror 没加载出来，也用原生 textarea 顶上
+    const ta = document.createElement("textarea");
+    ta.id = "editor-fallback";
+    ta.value = localStorage.getItem(STORAGE_KEY_CODE) || DEFAULT_CODE;
+    ta.style.cssText = "width:100%;height:100%;border:none;outline:none;padding:10px;font-family:monospace;font-size:14px;background:transparent;color:var(--ink);resize:none;";
+    $("editor").appendChild(ta);
+    logSys("已启用备用编辑器（textarea）");
   }
-  initPyodide();
+
+  // Pyodide 延迟加载：页面先可用，避免遮挡
+  setTimeout(() => { initPyodide(); }, 400);
 })();

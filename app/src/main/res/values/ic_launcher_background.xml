@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#FFE4EF</color>
+    <!-- 粉紫渐变背景：由两层柔和粉紫构成 -->
+    <color name="ic_launcher_background">#FFDCEB</color>
 </resources>

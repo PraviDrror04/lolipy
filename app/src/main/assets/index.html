@@ -4,15 +4,18 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <title>萝莉Python</title>
-<link rel="stylesheet" href="style.css" />
-<!-- CodeMirror 6 通过 esm.sh 动态加载 -->
-</head>
-<body>
 
-<!-- 顶部标题栏 -->
+<!-- 本地内置样式（离线可用，不再依赖任何 CDN） -->
+<link rel="stylesheet" href="vendor/codemirror.css" />
+<link rel="stylesheet" href="style.css" />
+<link rel="icon" href="icon512.png" />
+</head>
+<body class="loading-mode">
+
+<!-- 顶栏 -->
 <header id="topbar">
   <div class="brand">
-    <span class="avatar">(๑•̀ㅂ•́)و✧</span>
+    <img class="avatar-img" src="icon512.png" alt="萝莉Python" />
     <span class="title">萝莉Python</span>
   </div>
   <div class="actions">
@@ -23,11 +26,11 @@
   </div>
 </header>
 
-<!-- 主体：左编辑 / 右控制台 -->
+<!-- 主体 -->
 <main id="layout">
   <section id="editor-pane">
     <div id="editor"></div>
-    <div id="editor-status">Python 3 · 就绪 ⭐</div>
+    <div id="editor-status">Python 3 · 第 1 行 · 就绪 ⭐</div>
   </section>
 
   <section id="output-pane">
@@ -36,11 +39,11 @@
       <button id="btn-clear" class="mini">清空</button>
     </div>
     <pre id="output"></pre>
-    <div id="runtime-status">Pyodide 未加载</div>
+    <div id="runtime-status">Python 环境未加载</div>
   </section>
 </main>
 
-<!-- AI 侧边抽屉 -->
+<!-- AI 抽屉 -->
 <aside id="ai-drawer" class="hidden">
   <div class="drawer-head">
     <span>✨ 小码 · DeepSeek 助手</span>
@@ -60,7 +63,7 @@
   </div>
 </aside>
 
-<!-- API 设置弹窗 -->
+<!-- 设置弹窗 -->
 <div id="settings-modal" class="modal hidden">
   <div class="modal-box">
     <h3>⚙ DeepSeek API 设置</h3>
@@ -81,9 +84,22 @@
   </div>
 </div>
 
-<!-- 加载遮罩 -->
-<div id="loading" class="hidden"><div class="spinner"></div><p>小码正在准备 Python 环境…</p></div>
+<!-- Python 运行时加载提示（仅首次需要联网下载） -->
+<div id="py-loading" class="hidden">
+  <div class="spinner"></div>
+  <p id="py-loading-text">小码正在准备 Python 环境…</p>
+</div>
 
+<!-- 内置本地依赖：CodeMirror 5（离线秒开，绝不会白屏） -->
+<script src="vendor/codemirror.js"></script>
+<script src="vendor/clike.js"></script>
+<script src="vendor/python.js"></script>
+<script src="vendor/closebrackets.js"></script>
+<script src="vendor/matchbrackets.js"></script>
+<script src="vendor/active-line.js"></script>
+<script src="vendor/placeholder.js"></script>
+
+<!-- 主逻辑 -->
 <script src="app.js"></script>
 </body>
 </html>
