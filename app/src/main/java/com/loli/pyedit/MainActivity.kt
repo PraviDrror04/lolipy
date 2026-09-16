@@ -2,7 +2,11 @@ package com.loli.pyedit
 
 import android.annotation.SuppressLint
 import android.os.Bundle
+import android.view.View
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -95,12 +99,43 @@ fun EditorScreen(
                 @Suppress("DEPRECATION")
                 settings.allowFileAccessFromFileURLs = true
 
+                // ===== 白屏根因修复 =====
+                // 小米平板 8 Pro（Android 16 / Adreno GPU）上，WebView 的 Vulkan 硬件加速
+                // 合成管线 shader 编译失败（AdrenoVK: Shader compilation failed /
+                // Pipeline create failed），导致 WebView 内容渲染不出来、只见 Surface 背景
+                // 的近白色。强制走软件渲染，绕过 GPU/Vulkan，恢复页面绘制。
+                setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+                setBackgroundColor(0xFFFFF7FB)
+
                 webViewClient = object : WebViewClient() {
                     override fun shouldOverrideUrlLoading(
                         view: WebView, request: WebResourceRequest
                     ): Boolean {
                         // 站内 file:// 与 CDN 资源都放行，不做外部跳转
                         return false
+                    }
+
+                    override fun onReceivedError(
+                        view: WebView,
+                        request: WebResourceRequest,
+                        error: WebResourceError
+                    ) {
+                        android.util.Log.e(
+                            "LoliPy",
+                            "WebView error: ${error.errorCode} ${error.description} @ ${request.url}"
+                        )
+                        super.onReceivedError(view, request, error)
+                    }
+                }
+
+                // 捕获网页 console，便于后续定位 JS 问题
+                webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
+                        android.util.Log.d(
+                            "LoliPy",
+                            "console[${msg.messageLevel()}]: ${msg.message()} (${msg.sourceId()}:${msg.lineNumber()})"
+                        )
+                        return true
                     }
                 }
 
