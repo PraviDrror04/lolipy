@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>萝莉Python</title>
+<link rel="stylesheet" href="style.css" />
+<!-- CodeMirror 6 通过 esm.sh 动态加载 -->
+</head>
+<body>
+
+<!-- 顶部标题栏 -->
+<header id="topbar">
+  <div class="brand">
+    <span class="avatar">(๑•̀ㅂ•́)و✧</span>
+    <span class="title">萝莉Python</span>
+  </div>
+  <div class="actions">
+    <button id="btn-run" class="pill run">▶ 运行</button>
+    <button id="btn-stop" class="pill stop" disabled>■ 停止</button>
+    <button id="btn-ai" class="pill ai">✨ 小码</button>
+    <button id="btn-theme" class="pill ghost">🌗</button>
+  </div>
+</header>
+
+<!-- 主体：左编辑 / 右控制台 -->
+<main id="layout">
+  <section id="editor-pane">
+    <div id="editor"></div>
+    <div id="editor-status">Python 3 · 就绪 ⭐</div>
+  </section>
+
+  <section id="output-pane">
+    <div class="pane-head">
+      <span>控制台输出</span>
+      <button id="btn-clear" class="mini">清空</button>
+    </div>
+    <pre id="output"></pre>
+    <div id="runtime-status">Pyodide 未加载</div>
+  </section>
+</main>
+
+<!-- AI 侧边抽屉 -->
+<aside id="ai-drawer" class="hidden">
+  <div class="drawer-head">
+    <span>✨ 小码 · DeepSeek 助手</span>
+    <button id="btn-ai-close" class="mini">✕</button>
+  </div>
+  <div class="drawer-tools">
+    <button class="tool" data-tool="explain">解释所选</button>
+    <button class="tool" data-tool="fix">修复报错</button>
+    <button class="tool" data-tool="gen">生成代码</button>
+    <button class="tool" data-tool="comment">加注释</button>
+    <button class="tool" data-tool="settings">⚙ API 设置</button>
+  </div>
+  <div id="ai-log" class="ai-log"></div>
+  <div class="drawer-input">
+    <input id="ai-input" placeholder="问小码点什么…" />
+    <button id="btn-ai-send">发出</button>
+  </div>
+</aside>
+
+<!-- API 设置弹窗 -->
+<div id="settings-modal" class="modal hidden">
+  <div class="modal-box">
+    <h3>⚙ DeepSeek API 设置</h3>
+    <label>API Key</label>
+    <input id="in-key" type="password" placeholder="sk-..." />
+    <label>接口地址 (base_url)</label>
+    <input id="in-base" placeholder="https://api.deepseek.com" />
+    <label>模型</label>
+    <select id="in-model">
+      <option value="deepseek-chat">deepseek-chat</option>
+      <option value="deepseek-reasoner">deepseek-reasoner</option>
+    </select>
+    <div class="modal-actions">
+      <button id="btn-cancel" class="pill ghost">取消</button>
+      <button id="btn-save" class="pill run">保存</button>
+    </div>
+    <p class="hint">Key 仅保存在本机 localStorage，不会上传到任何服务器。</p>
+  </div>
+</div>
+
+<!-- 加载遮罩 -->
+<div id="loading" class="hidden"><div class="spinner"></div><p>小码正在准备 Python 环境…</p></div>
+
+<script src="app.js"></script>
+</body>
+</html>
