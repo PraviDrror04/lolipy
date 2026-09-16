@@ -7,6 +7,27 @@
 
 const $ = (id) => document.getElementById(id);
 
+/* ---------- 安全存储层 ----------
+ * file:// 页面下 localStorage 可能抛 SecurityError，
+ * 一旦抛错会中断整段脚本导致白屏。这里做一层永不抛错的兜底。 */
+const safeStore = (() => {
+  try {
+    const t = "__lolipy_t__";
+    localStorage.setItem(t, "1");
+    localStorage.removeItem(t);
+    return {
+      get: (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } },
+      set: (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} },
+    };
+  } catch (_) {
+    const mem = {};
+    return {
+      get: (k) => (k in mem ? mem[k] : null),
+      set: (k, v) => { mem[k] = String(v); },
+    };
+  }
+})();
+
 /* ---------- 全局状态 ---------- */
 const state = {
   cm: null,
@@ -15,9 +36,9 @@ const state = {
   stopRequested: false,
   aiHistory: [],
   cfg: {
-    key: localStorage.getItem("lolipy_key") || "",
-    base: localStorage.getItem("lolipy_base") || "https://api.deepseek.com",
-    model: localStorage.getItem("lolipy_model") || "deepseek-chat",
+    key: safeStore.get("lolipy_key") || "",
+    base: safeStore.get("lolipy_base") || "https://api.deepseek.com",
+    model: safeStore.get("lolipy_model") || "deepseek-chat",
   },
 };
 
@@ -57,7 +78,7 @@ function initEditor() {
     return false;
   }
 
-  const savedCode = localStorage.getItem(STORAGE_KEY_CODE);
+  const savedCode = safeStore.get(STORAGE_KEY_CODE);
 
   state.cm = CodeMirror($("editor"), {
     value: savedCode || DEFAULT_CODE,
@@ -91,7 +112,7 @@ function initEditor() {
     // 防抖保存草稿
     clearTimeout(state._saveTimer);
     state._saveTimer = setTimeout(() => {
-      try { localStorage.setItem(STORAGE_KEY_CODE, state.cm.getValue()); } catch (_) {}
+      safeStore.set(STORAGE_KEY_CODE, state.cm.getValue());
     }, 500);
   });
 
@@ -117,12 +138,25 @@ const PYODIDE_SOURCES = [
   "https://cdnjs.cloudflare.com/ajax/libs/pyodide/0.26.2/",
 ];
 
-function loadScript(src) {
+function loadScript(src, timeoutMs = 10000) {
   return new Promise((res, rej) => {
     const s = document.createElement("script");
+    let settled = false;
+    const done = (fn) => (arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(arg);
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      s.remove();
+      rej(new Error("加载超时: " + src));
+    }, timeoutMs);
     s.src = src;
-    s.onload = res;
-    s.onerror = () => rej(new Error("加载失败: " + src));
+    s.onload = done(() => res());
+    s.onerror = done(() => rej(new Error("加载失败: " + src)));
     document.head.appendChild(s);
   });
 }
@@ -322,7 +356,7 @@ function bindUI() {
   $("btn-clear").onclick = () => { $("output").textContent = ""; };
   $("btn-theme").onclick = () => {
     document.body.classList.toggle("dark");
-    localStorage.setItem("lolipy_dark", document.body.classList.contains("dark") ? "1" : "0");
+    safeStore.set("lolipy_dark", document.body.classList.contains("dark") ? "1" : "0");
   };
 
   $("btn-ai").onclick = () => $("ai-drawer").classList.remove("hidden");
@@ -368,9 +402,9 @@ function saveSettings() {
   state.cfg.key = $("in-key").value.trim();
   state.cfg.base = $("in-base").value.trim() || "https://api.deepseek.com";
   state.cfg.model = $("in-model").value;
-  localStorage.setItem("lolipy_key", state.cfg.key);
-  localStorage.setItem("lolipy_base", state.cfg.base);
-  localStorage.setItem("lolipy_model", state.cfg.model);
+  safeStore.set("lolipy_key", state.cfg.key);
+  safeStore.set("lolipy_base", state.cfg.base);
+  safeStore.set("lolipy_model", state.cfg.model);
   $("settings-modal").classList.add("hidden");
   logOk("API 设置已保存（仅存本机）");
 }
@@ -388,7 +422,7 @@ window.__lolipyBack = function () {
 
 /* ---------- 启动 ---------- */
 (function boot() {
-  if (localStorage.getItem("lolipy_dark") === "1") document.body.classList.add("dark");
+  if (safeStore.get("lolipy_dark") === "1") document.body.classList.add("dark");
   document.body.classList.remove("loading-mode");
   bindUI();
 
@@ -399,12 +433,13 @@ window.__lolipyBack = function () {
     // 极端兜底：即便 CodeMirror 没加载出来，也用原生 textarea 顶上
     const ta = document.createElement("textarea");
     ta.id = "editor-fallback";
-    ta.value = localStorage.getItem(STORAGE_KEY_CODE) || DEFAULT_CODE;
+    ta.value = safeStore.get(STORAGE_KEY_CODE) || DEFAULT_CODE;
     ta.style.cssText = "width:100%;height:100%;border:none;outline:none;padding:10px;font-family:monospace;font-size:14px;background:transparent;color:var(--ink);resize:none;";
     $("editor").appendChild(ta);
     logSys("已启用备用编辑器（textarea）");
   }
 
-  // Pyodide 延迟加载：页面先可用，避免遮挡
-  setTimeout(() => { initPyodide(); }, 400);
+  // Pyodide 改为「按需加载」：启动时不联网下载运行时，
+  // 只在用户点击「▶ 运行」时才通过 ensurePyodide() 触发，
+  // 避免打开应用即弹出近白遮罩、国内 CDN 卡死导致的“白屏”。
 })();
