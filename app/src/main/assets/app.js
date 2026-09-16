@@ -1,445 +1,473 @@
-/* =========================================================
- * 萝莉Python · 主逻辑
- *  - CodeMirror 5.65.16（本地 vendor/，离线秒开，不白屏）
- *  - Pyodide 运行 Python（多 CDN 源自动降级）
- *  - DeepSeek API 助手（小码）
- * ========================================================= */
+/* 萝莉Python 主逻辑 —— CodeMirror 编辑器 + Pyodide 运行 + AI 辅助 + 文件导入导出 */
+(function () {
+  'use strict';
 
-const $ = (id) => document.getElementById(id);
+  // ---------- 常量 ----------
+  var API_KEY_KEY = 'lolipy.api.key';
+  var API_BASE_KEY = 'lolipy.api.base';
+  var API_MODEL_KEY = 'lolipy.api.model';
+  var THEME_KEY = 'lolipy.theme';
 
-/* ---------- 安全存储层 ----------
- * file:// 页面下 localStorage 可能抛 SecurityError，
- * 一旦抛错会中断整段脚本导致白屏。这里做一层永不抛错的兜底。 */
-const safeStore = (() => {
-  try {
-    const t = "__lolipy_t__";
-    localStorage.setItem(t, "1");
-    localStorage.removeItem(t);
-    return {
-      get: (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } },
-      set: (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} },
-    };
-  } catch (_) {
-    const mem = {};
-    return {
-      get: (k) => (k in mem ? mem[k] : null),
-      set: (k, v) => { mem[k] = String(v); },
-    };
+  var PYODIDE_VERSION = 'v0.26.4';
+  var PYODIDE_JS = 'https://cdn.jsdelivr.net/pyodide/' + PYODIDE_VERSION + '/full/pyodide.js';
+  var PYODIDE_INDEX = 'https://cdn.jsdelivr.net/pyodide/' + PYODIDE_VERSION + '/full/';
+
+  var DEFAULT_CODE =
+    '# 欢迎使用 萝莉Python ✨\n' +
+    '# 这里可以编写并运行 Python 代码\n' +
+    'print("Hello, 萝莉Python!")\n\n' +
+    'for i in range(5):\n' +
+    '    print("第", i + 1, "次运行")\n';
+
+  // ---------- 状态 ----------
+  var editor = null;
+  var pyodide = null;
+  var pyLoading = false;
+  var currentFileName = 'script.py';
+
+  function el(id) { return document.getElementById(id); }
+
+  // ---------- 主题 ----------
+  function applyTheme(theme) {
+    document.body.setAttribute('data-theme', theme);
   }
-})();
-
-/* ---------- 全局状态 ---------- */
-const state = {
-  cm: null,
-  pyodide: null,
-  running: false,
-  stopRequested: false,
-  aiHistory: [],
-  cfg: {
-    key: safeStore.get("lolipy_key") || "",
-    base: safeStore.get("lolipy_base") || "https://api.deepseek.com",
-    model: safeStore.get("lolipy_model") || "deepseek-chat",
-  },
-};
-
-const DEFAULT_CODE = `# 欢迎来到 萝莉Python (๑•̀ㅂ•́)و✧
-# 点右上角「▶ 运行」跑起来，点「✨ 小码」找 AI 帮忙
-
-def greet(name):
-    return f"你好呀，{name}～"
-
-for n in ["主人", "世界"]:
-    print(greet(n))
-
-# 试试列表推导
-squares = [x * x for x in range(6)]
-print("平方数:", squares)
-`;
-
-const STORAGE_KEY_CODE = "lolipy_code";
-
-/* ---------- 控制台输出 ---------- */
-function log(text, cls = "") {
-  const out = $("output");
-  const span = document.createElement("span");
-  if (cls) span.className = cls;
-  span.textContent = text + "\n";
-  out.appendChild(span);
-  out.scrollTop = out.scrollHeight;
-}
-function logSys(t) { log("· " + t, "sys"); }
-function logOk(t)  { log("✔ " + t, "ok"); }
-function logErr(t) { log("✘ " + t, "err"); }
-
-/* ---------- CodeMirror 5 初始化（纯本地，同步可用） ---------- */
-function initEditor() {
-  if (typeof CodeMirror === "undefined") {
-    logErr("编辑器内核未加载（vendor/codemirror.js 缺失）");
-    return false;
+  function loadTheme() {
+    applyTheme(localStorage.getItem(THEME_KEY) || 'light');
+  }
+  function toggleTheme() {
+    var next = (document.body.getAttribute('data-theme') === 'dark') ? 'light' : 'dark';
+    applyTheme(next);
+    localStorage.setItem(THEME_KEY, next);
   }
 
-  const savedCode = safeStore.get(STORAGE_KEY_CODE);
-
-  state.cm = CodeMirror($("editor"), {
-    value: savedCode || DEFAULT_CODE,
-    mode: { name: "python", version: 3, singleLineStringErrors: false },
-    lineNumbers: true,
-    indentUnit: 4,
-    tabSize: 4,
-    indentWithTabs: false,
-    smartIndent: true,
-    lineWrapping: false,
-    styleActiveLine: true,
-    matchBrackets: true,
-    autoCloseBrackets: true,
-    theme: "lolipy",           // 自定义粉紫主题（见 style.css）
-    extraKeys: {
-      "Tab": (cm) => {
-        if (cm.somethingSelected()) cm.indentSelection("add");
-        else cm.replaceSelection("    ", "end");
-      },
-      "Shift-Tab": (cm) => cm.indentSelection("subtract"),
-      "Ctrl-/": (cm) => cm.toggleComment(),
-      "Cmd-/": (cm) => cm.toggleComment(),
-    },
-    placeholder: "# 在这里写 Python 吧～",
-  });
-
-  updateStatus();
-  state.cm.on("cursorActivity", updateStatus);
-  state.cm.on("change", () => {
-    updateStatus();
-    // 防抖保存草稿
-    clearTimeout(state._saveTimer);
-    state._saveTimer = setTimeout(() => {
-      safeStore.set(STORAGE_KEY_CODE, state.cm.getValue());
-    }, 500);
-  });
-
-  // 首次聚焦
-  setTimeout(() => state.cm && state.cm.refresh(), 60);
-  return true;
-}
-
-function getCode() { return state.cm ? state.cm.getValue() : ""; }
-function setCode(text) { if (state.cm) state.cm.setValue(text); }
-function updateStatus() {
-  if (!state.cm) return;
-  const cur = state.cm.getCursor();
-  const len = state.cm.getValue().length;
-  $("editor-status").textContent = `Python 3 · 第 ${cur.line + 1} 行 · ${len} 字符 ⭐`;
-}
-
-/* ---------- Pyodide 加载（多源降级） ---------- */
-const PYODIDE_SOURCES = [
-  "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/",
-  "https://fastly.jsdelivr.net/pyodide/v0.26.2/full/",
-  "https://unpkg.com/pyodide@0.26.2/",
-  "https://cdnjs.cloudflare.com/ajax/libs/pyodide/0.26.2/",
-];
-
-function loadScript(src, timeoutMs = 10000) {
-  return new Promise((res, rej) => {
-    const s = document.createElement("script");
-    let settled = false;
-    const done = (fn) => (arg) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      fn(arg);
-    };
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      s.remove();
-      rej(new Error("加载超时: " + src));
-    }, timeoutMs);
-    s.src = src;
-    s.onload = done(() => res());
-    s.onerror = done(() => rej(new Error("加载失败: " + src)));
-    document.head.appendChild(s);
-  });
-}
-
-async function initPyodide() {
-  const mask = $("py-loading");
-  const maskText = $("py-loading-text");
-  // 只在「运行」时打扰用户，且给出可跳过提示
-  logSys("正在准备 Python 环境（首次需联网下载，请稍候）…");
-  $("runtime-status").textContent = "Python 环境加载中…";
-  if (mask) mask.classList.remove("hidden");
-
-  let lastErr = null;
-  for (const base of PYODIDE_SOURCES) {
-    try {
-      if (maskText) maskText.textContent = "小码正在准备 Python 环境…\n(" + new URL(base).host + ")";
-      logSys("尝试源: " + new URL(base).host);
-      await loadScript(base + "pyodide.js");
-      state.pyodide = await window.loadPyodide({ indexURL: base });
-      state.pyodide.setStdout({ batched: (s) => log(s) });
-      state.pyodide.setStderr({ batched: (s) => log(s, "err") });
-      $("runtime-status").textContent = "Python 3.12 就绪 ⭐";
-      logOk("Python 环境已就绪！");
-      if (mask) mask.classList.add("hidden");
-      return true;
-    } catch (e) {
-      lastErr = e;
-      logErr("该源不可用：" + e.message);
+  // ---------- 轻提示 ----------
+  function toast(msg) {
+    if (window.NativeBridge && window.NativeBridge.toast) {
+      try { window.NativeBridge.toast(msg); return; } catch (e) {}
     }
+    var t = document.createElement('div');
+    t.className = 'toast';
+    t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 2000);
   }
 
-  $("runtime-status").textContent = "Python 环境加载失败";
-  logErr("Python 环境加载失败：" + (lastErr ? lastErr.message : "未知错误"));
-  logSys("（首次运行需要联网下载约 30MB 运行时，请确认网络可用后重试）");
-  if (mask) mask.classList.add("hidden");
-  return false;
-}
-
-/* 运行时未就绪时，按需加载后执行 */
-async function ensurePyodide() {
-  if (state.pyodide) return true;
-  return await initPyodide();
-}
-
-async function runCode() {
-  if (state.running) return;
-  $("btn-run").disabled = true;
-  const ok = await ensurePyodide();
-  if (!ok) { $("btn-run").disabled = false; return; }
-
-  const code = getCode();
-  state.running = true; state.stopRequested = false;
-  $("btn-stop").disabled = false;
-  logSys("— 开始运行 —");
-  const t0 = performance.now();
-  try {
-    await state.pyodide.runPythonAsync(code);
-    const ms = (performance.now() - t0).toFixed(0);
-    logOk(`运行结束，用时 ${ms} ms`);
-    speak("跑好啦～");
-  } catch (e) {
-    logErr(String(e.message || e));
-    speak("呜…出错惹");
-  } finally {
-    state.running = false;
-    $("btn-run").disabled = false; $("btn-stop").disabled = true;
-  }
-}
-
-function stopCode() {
-  if (!state.running) return;
-  state.stopRequested = true;
-  logSys("（Pyodide 不支持中断正在执行的同步代码，请等待当前代码结束）");
-}
-
-/* ---------- 语音（Web Speech，可选） ---------- */
-function speak(text) {
-  try {
-    if (!("speechSynthesis" in window)) return;
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = "zh-CN"; u.pitch = 1.6; u.rate = 1.05; u.volume = 0.9;
-    window.speechSynthesis.speak(u);
-  } catch (_) {}
-}
-
-/* ---------- DeepSeek API ---------- */
-const SYSTEM_PROMPT =
-  "你是「小码」，一个可爱的二次元萝莉编程助手，说话俏皮但技术靠谱。" +
-  "用户在用手机写 Python。回答尽量简洁，代码用 markdown 代码块。";
-
-async function callDeepSeek(messages, onDelta) {
-  if (!state.cfg.key) {
-    throw new Error("还没配置 API Key，点「⚙ API 设置」填一下～");
-  }
-  const url = state.cfg.base.replace(/\/$/, "") + "/v1/chat/completions";
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer " + state.cfg.key,
-    },
-    body: JSON.stringify({
-      model: state.cfg.model,
-      messages,
-      stream: true,
-      temperature: 0.6,
-    }),
-  });
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => "");
-    throw new Error(`API ${resp.status}: ${txt.slice(0, 200)}`);
-  }
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder("utf-8");
-  let buf = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    const lines = buf.split("\n");
-    buf = lines.pop();
-    for (const line of lines) {
-      const s = line.trim();
-      if (!s.startsWith("data:")) continue;
-      const data = s.slice(5).trim();
-      if (data === "[DONE]") continue;
-      try {
-        const j = JSON.parse(data);
-        const delta = j.choices?.[0]?.delta?.content;
-        if (delta) onDelta(delta);
-      } catch (_) {}
-    }
-  }
-}
-
-/* ---------- AI 抽屉 UI ---------- */
-function aiAdd(role, text) {
-  const logEl = $("ai-log");
-  const div = document.createElement("div");
-  div.className = "msg " + (role === "user" ? "user" : "bot");
-  div.innerHTML = renderMarkdown(text);
-  logEl.appendChild(div);
-  logEl.scrollTop = logEl.scrollHeight;
-  return div;
-}
-
-function renderMarkdown(t) {
-  const esc = t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  return esc.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
-    `<pre><code>${code.replace(/\n$/, "")}</code></pre>`)
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\n/g, "<br>");
-}
-
-async function askAI(userText, systemExtra = "") {
-  aiAdd("user", userText);
-  const botEl = aiAdd("bot", "…");
-  const msgs = [
-    { role: "system", content: SYSTEM_PROMPT + (systemExtra ? "\n" + systemExtra : "") },
-    ...state.aiHistory.slice(-8),
-    { role: "user", content: userText },
-  ];
-  let acc = "";
-  try {
-    await callDeepSeek(msgs, (delta) => {
-      acc += delta;
-      botEl.innerHTML = renderMarkdown(acc);
-      $("ai-log").scrollTop = $("ai-log").scrollHeight;
+  // ---------- 编辑器 ----------
+  function initEditor() {
+    editor = CodeMirror(el('editor'), {
+      value: DEFAULT_CODE,
+      mode: 'python',
+      theme: 'default',
+      lineNumbers: true,
+      indentUnit: 4,
+      tabSize: 4,
+      indentWithTabs: false,
+      lineWrapping: false,
+      styleActiveLine: true,
+      matchBrackets: true,
+      autoCloseBrackets: true,
+      placeholder: '# 在这里写 Python 代码…'
     });
-    state.aiHistory.push({ role: "user", content: userText });
-    state.aiHistory.push({ role: "assistant", content: acc });
-  } catch (e) {
-    botEl.innerHTML = renderMarkdown("呜…出错了：" + e.message);
+    editor.on('change', updateStatus);
+    editor.on('cursorActivity', updateStatus);
+    updateStatus();
   }
-}
 
-/* ---------- 工具按钮 ---------- */
-function getSelectionText() {
-  if (!state.cm) return "";
-  return state.cm.getSelection();
-}
+  function updateStatus() {
+    var c = editor.getCursor();
+    el('editor-status').textContent =
+      'Python 3 · 第 ' + (c.line + 1) + ' 行 / 共 ' + editor.lineCount() +
+      ' 行 · ' + currentFileName;
+  }
 
-const TOOL_PROMPTS = {
-  explain: (code) => `请用中文解释这段 Python 代码在做什么，简明扼要：\n\`\`\`python\n${code}\n\`\`\``,
-  fix: () => `我的 Python 代码报错了，请帮我分析原因并给出修正后的代码。\n\n当前代码：\n\`\`\`python\n${getCode()}\n\`\`\`\n\n最近的控制台输出：\n\`\`\`\n${$("output").textContent.slice(-1200)}\n\`\`\``,
-  gen: () => {
-    const ask = prompt("想让小码写什么代码？", "读取一个列表并打印其中所有偶数");
-    return ask ? `请写一段 Python 代码：${ask}。只给代码和简短说明。` : null;
-  },
-  comment: (code) => `请给这段代码加上清晰的中文注释，直接返回带注释的完整代码：\n\`\`\`python\n${code || getCode()}\n\`\`\``,
-};
+  // ---------- 输出 ----------
+  function appendOut(s) {
+    var pre = el('output');
+    pre.textContent += s;
+    pre.scrollTop = pre.scrollHeight;
+  }
 
-/* ---------- 事件绑定 ---------- */
-function bindUI() {
-  $("btn-run").onclick = runCode;
-  $("btn-stop").onclick = stopCode;
-  $("btn-clear").onclick = () => { $("output").textContent = ""; };
-  $("btn-theme").onclick = () => {
-    document.body.classList.toggle("dark");
-    safeStore.set("lolipy_dark", document.body.classList.contains("dark") ? "1" : "0");
-  };
+  // ---------- 运行 Python ----------
+  function runCode() {
+    var code = editor.getValue();
+    if (!code.trim()) { appendOut('(没有可运行的代码)\n'); return; }
+    el('btn-run').disabled = true;
+    el('btn-stop').disabled = false;
+    ensurePyodide(
+      function (py) {
+        appendOut('>>> 运行中…\n');
+        try {
+          py.setStdout({ batched: function (s) { appendOut(s); } });
+          py.setStderr({ batched: function (s) { appendOut(s); } });
+          var r = py.runPython(code);
+          if (r !== undefined && r !== null) appendOut(String(r) + '\n');
+          appendOut('\n>>> 运行结束\n');
+        } catch (err) {
+          appendOut('\n⚠️ 运行错误：' + (err && err.message ? err.message : err) + '\n');
+        }
+        el('btn-run').disabled = false;
+        el('btn-stop').disabled = true;
+      },
+      function (err) {
+        appendOut('\n⚠️ Python 环境加载失败：' + err + '\n');
+        el('btn-run').disabled = false;
+        el('btn-stop').disabled = true;
+      }
+    );
+  }
 
-  $("btn-ai").onclick = () => $("ai-drawer").classList.remove("hidden");
-  $("btn-ai-close").onclick = () => $("ai-drawer").classList.add("hidden");
+  function stopCode() {
+    // 同步运行的 Pyodide 无法被真正中断，这里做状态复位
+    el('btn-run').disabled = false;
+    el('btn-stop').disabled = true;
+    appendOut('\n(已停止 / 复位)\n');
+  }
 
-  $("btn-ai-send").onclick = () => {
-    const v = $("ai-input").value.trim();
-    if (!v) return;
-    $("ai-input").value = "";
-    askAI(v + "\n\n（当前编辑器代码：\n```python\n" + getCode().slice(0, 2000) + "\n```）");
-  };
-  $("ai-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") $("btn-ai-send").click();
-  });
+  function showPyLoading(show, text) {
+    if (text) el('py-loading-text').textContent = text;
+    var d = el('py-loading');
+    if (show) d.classList.remove('hidden'); else d.classList.add('hidden');
+  }
 
-  document.querySelectorAll(".tool").forEach((btn) => {
-    btn.onclick = () => {
-      const t = btn.dataset.tool;
-      if (t === "settings") return openSettings();
-      const code = getSelectionText();
-      const fn = TOOL_PROMPTS[t];
-      if (!fn) return;
-      const promptText = fn(code);
-      if (promptText) askAI(promptText, "当前编辑器完整代码：\n```python\n" + getCode().slice(0, 3000) + "\n```");
+  function ensurePyodide(onOk, onErr) {
+    if (pyodide) { onOk(pyodide); return; }
+    if (pyLoading) { appendOut('(Python 环境加载中，请稍候…)\n'); return; }
+    pyLoading = true;
+    showPyLoading(true, '小码正在准备 Python 环境（首次需联网下载，约 10~20MB）…');
+
+    function doLoad() {
+      window.loadPyodide({ indexURL: PYODIDE_INDEX })
+        .then(function (py) {
+          pyodide = py;
+          pyLoading = false;
+          showPyLoading(false);
+          el('runtime-status').textContent = 'Python 3（Pyodide）已就绪';
+          onOk(py);
+        })
+        .catch(function (e) {
+          pyLoading = false;
+          showPyLoading(false);
+          onErr(e && e.message ? e.message : e);
+        });
+    }
+
+    if (window.loadPyodide) {
+      doLoad();
+    } else {
+      var s = document.createElement('script');
+      s.src = PYODIDE_JS;
+      s.onload = doLoad;
+      s.onerror = function () {
+        pyLoading = false;
+        showPyLoading(false);
+        onErr('下载 Pyodide 运行时失败，请检查网络后重试');
+      };
+      document.body.appendChild(s);
+    }
+  }
+
+  // ---------- 文件菜单 ----------
+  function toggleFileMenu() {
+    el('file-menu').classList.toggle('hidden');
+  }
+  function closeFileMenu() {
+    el('file-menu').classList.add('hidden');
+  }
+
+  function newFile() {
+    editor.setValue(DEFAULT_CODE);
+    currentFileName = 'script.py';
+    updateStatus();
+    closeFileMenu();
+    toast('已新建文件');
+  }
+
+  function openFile() {
+    closeFileMenu();
+    if (window.NativeBridge && window.NativeBridge.openFile) {
+      try { window.NativeBridge.openFile(); return; } catch (e) {}
+    }
+    // 浏览器回退：本地文件选择
+    var inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = '.py,.txt,text/*';
+    inp.onchange = function () {
+      var f = inp.files && inp.files[0];
+      if (!f) return;
+      var r = new FileReader();
+      r.onload = function () {
+        editor.setValue(String(r.result || ''));
+        currentFileName = f.name;
+        updateStatus();
+        toast('已打开：' + f.name);
+      };
+      r.readAsText(f);
     };
-  });
-
-  $("btn-cancel").onclick = () => $("settings-modal").classList.add("hidden");
-  $("btn-save").onclick = saveSettings;
-
-  // 有屏幕变化时刷新编辑器尺寸
-  window.addEventListener("resize", () => state.cm && state.cm.refresh());
-  window.addEventListener("orientationchange", () => setTimeout(() => state.cm && state.cm.refresh(), 200));
-}
-
-function openSettings() {
-  $("in-key").value = state.cfg.key;
-  $("in-base").value = state.cfg.base;
-  $("in-model").value = state.cfg.model;
-  $("settings-modal").classList.remove("hidden");
-}
-function saveSettings() {
-  state.cfg.key = $("in-key").value.trim();
-  state.cfg.base = $("in-base").value.trim() || "https://api.deepseek.com";
-  state.cfg.model = $("in-model").value;
-  safeStore.set("lolipy_key", state.cfg.key);
-  safeStore.set("lolipy_base", state.cfg.base);
-  safeStore.set("lolipy_model", state.cfg.model);
-  $("settings-modal").classList.add("hidden");
-  logOk("API 设置已保存（仅存本机）");
-}
-
-/* ---------- 返回键钩子（供原生 BackHandler 调用） ---------- */
-window.__lolipyBack = function () {
-  const drawer = $("ai-drawer");
-  const modal = $("settings-modal");
-  if (modal && !modal.classList.contains("hidden")) { modal.classList.add("hidden"); return; }
-  if (drawer && !drawer.classList.contains("hidden")) { drawer.classList.add("hidden"); return; }
-  if (window.AndroidBridge && AndroidBridge.toast) {
-    AndroidBridge.toast("再按一次返回键退出哦～");
+    inp.click();
   }
-};
 
-/* ---------- 启动 ---------- */
-(function boot() {
-  if (safeStore.get("lolipy_dark") === "1") document.body.classList.add("dark");
-  document.body.classList.remove("loading-mode");
-  bindUI();
+  function saveFile() {
+    closeFileMenu();
+    var name = currentFileName || 'script.py';
+    var content = editor.getValue();
+    if (window.NativeBridge && window.NativeBridge.saveFile) {
+      try { window.NativeBridge.saveFile(name, content); return; } catch (e) {}
+    }
+    // 浏览器回退：下载
+    var blob = new Blob([content], { type: 'text/x-python' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
 
-  const ok = initEditor();
-  if (ok) {
-    logOk("编辑器已就绪（离线内核）");
+  // 原生回调（MainActivity 通过 evaluateJavascript 调用）
+  window.__onFileOpened = function (data) {
+    if (!data) return;
+    editor.setValue(data.content || '');
+    currentFileName = data.name || 'imported.py';
+    updateStatus();
+    toast('已打开：' + currentFileName);
+  };
+
+  window.__onFileSaved = function (data) {
+    if (data && data.ok) {
+      currentFileName = data.name || currentFileName;
+      updateStatus();
+      toast('已保存：' + currentFileName);
+    } else {
+      toast('保存失败');
+    }
+  };
+
+  // ---------- AI 抽屉 ----------
+  function toggleAi() {
+    el('ai-drawer').classList.toggle('hidden');
+  }
+
+  function aiLog(role, text) {
+    var box = el('ai-log');
+    var d = document.createElement('div');
+    d.className = 'msg ' + role;
+    d.textContent = text;
+    box.appendChild(d);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function aiErr(e) { aiLog('error', '请求失败：' + e); }
+
+  function resolveEndpoint(base) {
+    base = (base || '').trim().replace(/\/+$/, '');
+    if (!base) return '';
+    if (/\/chat\/completions$/.test(base)) return base;
+    if (/\/compatible-mode\/v1$/.test(base)) return base + '/chat/completions';
+    if (/\/compatible-mode$/.test(base)) return base + '/chat/completions';
+    if (/\/v1$/.test(base)) return base + '/chat/completions';
+    return base + '/v1/chat/completions';
+  }
+
+  function callAI(prompt, onOk, onErr) {
+    var key = localStorage.getItem(API_KEY_KEY);
+    var base = localStorage.getItem(API_BASE_KEY);
+    var model = localStorage.getItem(API_MODEL_KEY);
+    if (!key || !base || !model) {
+      openSettings();
+      aiLog('system', '请先填写 API Key / 接口地址 / 模型');
+      if (onErr) onErr('未配置 API');
+      return;
+    }
+    var endpoint = resolveEndpoint(base);
+    var body = {
+      model: model,
+      messages: [
+        { role: 'system', content: '你是萝莉Python内置的编程助手，回答尽量简洁，需要代码时直接给出可用代码。' },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.3
+    };
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', endpoint, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.setRequestHeader('Authorization', 'Bearer ' + key);
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) return;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          var json = JSON.parse(xhr.responseText);
+          var reply = json.choices && json.choices[0] &&
+                      json.choices[0].message && json.choices[0].message.content;
+          if (reply) { onOk(reply); }
+          else if (onErr) { onErr(JSON.stringify(json).slice(0, 300)); }
+        } catch (e) { if (onErr) onErr(e.message); }
+      } else {
+        if (onErr) onErr(xhr.status + ' ' + xhr.statusText + ' ' + String(xhr.responseText || '').slice(0, 300));
+      }
+    };
+    xhr.onerror = function () { if (onErr) onErr('网络错误'); };
+    xhr.send(JSON.stringify(body));
+  }
+
+  function extractCode(text) {
+    if (!text) return '';
+    var m = text.match(/```(?:python|py)?\s*\n?([\s\S]*?)```/);
+    if (m) return m[1].replace(/\n+$/, '');
+    return text;
+  }
+
+  function onTool(e) {
+    var t = e.currentTarget.getAttribute('data-tool');
+    if (t === 'settings') { openSettings(); return; }
+
+    var sel = editor.getSelection();
+    var code = editor.getValue();
+    var focus = sel || code;
+
+    if (t === 'gen') {
+      var req = el('ai-input').value.trim();
+      if (!req) { aiLog('system', '请先在下方输入框写清楚要生成什么代码'); return; }
+      var gp = '你是 Python 编程助手。请只输出可直接运行的 Python 代码，不要多余解释。\n需求：' + req;
+      aiLog('user', '生成代码：' + req);
+      callAI(gp, function (r) {
+        aiLog('ai', r);
+        var c = extractCode(r);
+        if (c) { editor.replaceSelection(c); updateStatus(); }
+      }, aiErr);
+      return;
+    }
+
+    if (!code.trim()) { aiLog('system', '编辑器里还没有代码'); return; }
+
+    var prompt = '';
+    var replaceWhole = false;
+    var insertAtCursor = false;
+    var appendAtEnd = false;
+
+    switch (t) {
+      case 'explain':
+        prompt = '请用通俗的语言解释下面这段 Python 代码：\n```python\n' + focus + '\n```';
+        break;
+      case 'fix':
+        prompt = '下面代码有错误，请直接输出修正后的完整代码，不要额外解释：\n```python\n' + focus + '\n```';
+        replaceWhole = true;
+        break;
+      case 'comment':
+        prompt = '请给下面代码加上清晰的中文注释，输出加好注释的完整代码，不要额外解释：\n```python\n' + focus + '\n```';
+        replaceWhole = true;
+        break;
+      case 'complete':
+        prompt = '请续写下面这段 Python 代码（保持风格一致，直接输出续写的代码）：\n```python\n' + focus + '\n```';
+        insertAtCursor = true;
+        break;
+      case 'optimize':
+        prompt = '请优化下面 Python 代码（更简洁、更高效），直接输出优化后的完整代码：\n```python\n' + focus + '\n```';
+        replaceWhole = true;
+        break;
+      case 'test':
+        prompt = '请为下面 Python 代码生成单元测试（unittest），直接输出完整测试代码：\n```python\n' + focus + '\n```';
+        appendAtEnd = true;
+        break;
+      default:
+        return;
+    }
+
+    aiLog('user', prompt);
+    callAI(prompt, function (r) {
+      aiLog('ai', r);
+      var c = extractCode(r);
+      if (!c) return;
+      if (replaceWhole) {
+        if (sel) editor.replaceSelection(c); else editor.setValue(c);
+      } else if (insertAtCursor) {
+        editor.replaceSelection(c);
+      } else if (appendAtEnd) {
+        editor.replaceRange('\n\n' + c + '\n', { line: editor.lineCount(), ch: 0 });
+      }
+      updateStatus();
+    }, aiErr);
+  }
+
+  function sendAi() {
+    var inp = el('ai-input');
+    var q = inp.value.trim();
+    if (!q) return;
+    inp.value = '';
+    aiLog('user', q);
+    callAI(q, function (r) { aiLog('ai', r); }, aiErr);
+  }
+
+  // ---------- 设置 ----------
+  function openSettings() {
+    el('in-key').value = localStorage.getItem(API_KEY_KEY) || '';
+    el('in-base').value = localStorage.getItem(API_BASE_KEY) || 'https://api.deepseek.com';
+    el('in-model').value = localStorage.getItem(API_MODEL_KEY) || 'deepseek-chat';
+    el('settings-modal').classList.remove('hidden');
+  }
+  function closeSettings() {
+    el('settings-modal').classList.add('hidden');
+  }
+  function saveSettings() {
+    localStorage.setItem(API_KEY_KEY, el('in-key').value.trim());
+    localStorage.setItem(API_BASE_KEY, el('in-base').value.trim());
+    localStorage.setItem(API_MODEL_KEY, el('in-model').value.trim());
+    closeSettings();
+    aiLog('system', 'API 设置已保存（仅存本机）');
+    toast('设置已保存');
+  }
+
+  // ---------- 事件绑定 ----------
+  function bindEvents() {
+    el('btn-file').addEventListener('click', toggleFileMenu);
+    el('btn-run').addEventListener('click', runCode);
+    el('btn-stop').addEventListener('click', stopCode);
+    el('btn-ai').addEventListener('click', toggleAi);
+    el('btn-theme').addEventListener('click', toggleTheme);
+    el('btn-clear').addEventListener('click', function () { el('output').textContent = ''; });
+    el('btn-ai-close').addEventListener('click', toggleAi);
+    el('btn-ai-send').addEventListener('click', sendAi);
+    el('ai-input').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') sendAi();
+    });
+
+    document.querySelectorAll('#file-menu button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var a = b.getAttribute('data-file');
+        if (a === 'new') newFile();
+        else if (a === 'open') openFile();
+        else if (a === 'save') saveFile();
+      });
+    });
+
+    document.querySelectorAll('#ai-drawer .tool').forEach(function (b) {
+      b.addEventListener('click', onTool);
+    });
+
+    el('btn-cancel').addEventListener('click', closeSettings);
+    el('btn-save').addEventListener('click', saveSettings);
+
+    document.addEventListener('click', function (e) {
+      var menu = el('file-menu');
+      if (menu.classList.contains('hidden')) return;
+      if (!menu.contains(e.target) && e.target !== el('btn-file')) {
+        menu.classList.add('hidden');
+      }
+    });
+  }
+
+  // ---------- 启动 ----------
+  function init() {
+    loadTheme();
+    initEditor();
+    bindEvents();
+    document.body.classList.remove('loading-mode');
+    el('runtime-status').textContent = 'Python 环境未加载（点 ▶ 运行 时自动加载）';
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
   } else {
-    // 极端兜底：即便 CodeMirror 没加载出来，也用原生 textarea 顶上
-    const ta = document.createElement("textarea");
-    ta.id = "editor-fallback";
-    ta.value = safeStore.get(STORAGE_KEY_CODE) || DEFAULT_CODE;
-    ta.style.cssText = "width:100%;height:100%;border:none;outline:none;padding:10px;font-family:monospace;font-size:14px;background:transparent;color:var(--ink);resize:none;";
-    $("editor").appendChild(ta);
-    logSys("已启用备用编辑器（textarea）");
+    init();
   }
-
-  // Pyodide 改为「按需加载」：启动时不联网下载运行时，
-  // 只在用户点击「▶ 运行」时才通过 ensurePyodide() 触发，
-  // 避免打开应用即弹出近白遮罩、国内 CDN 卡死导致的“白屏”。
 })();
