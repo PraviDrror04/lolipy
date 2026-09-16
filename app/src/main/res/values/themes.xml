@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.LoliPy" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#FFE4EF</item>
+        <item name="android:navigationBarColor">#FFE4EF</item>
+        <item name="android:windowBackground">#FFF7FB</item>
+    </style>
+</resources>
