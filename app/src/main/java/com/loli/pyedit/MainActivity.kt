@@ -105,7 +105,7 @@ fun EditorScreen(
                 // Pipeline create failed），导致 WebView 内容渲染不出来、只见 Surface 背景
                 // 的近白色。强制走软件渲染，绕过 GPU/Vulkan，恢复页面绘制。
                 setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-                setBackgroundColor(0xFFFFF7FB)
+                setBackgroundColor(0xFFFFF7FB.toInt())
 
                 webViewClient = object : WebViewClient() {
                     override fun shouldOverrideUrlLoading(
